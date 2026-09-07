@@ -49,8 +49,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Validate existing latest signal if present
-        run: python scripts/validate_latest_signal.py --allow-missing
+      - name: Diagnose existing latest signal without blocking new research
+        run: |
+          if ! python scripts/validate_latest_signal.py --allow-missing >/dev/null 2>&1; then
+            echo "::warning::Existing signal artifact is untrusted or unavailable; diagnostic only, not acceptance of a new artifact."
+          fi
 
       - name: Build point-in-time context bundle
         run: |
