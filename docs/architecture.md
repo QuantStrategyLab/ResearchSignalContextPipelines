@@ -8,8 +8,17 @@ pipeline without changing that production boundary.
 
 This repository is deliberately narrower than `AIAuditBridge`. It owns
 research inputs, validation, saved artifacts, and replay harnesses. It does not
-own model provider routing, API keys, GitHub App write orchestration, live
-notifications, or execution behavior.
+own model provider routing, API keys, cross-repository GitHub App write
+orchestration, live notifications, or execution behavior.
+
+A limited same-repository exception is the source-only, production-disabled
+publisher for `data/output/theme_momentum_snapshot.json`. It can only transport
+that exact file through a run-bound draft PR using the dedicated single-repository
+App; it never writes `main`, merges, bypasses protection, or handles AI signal
+pairs or other files. Content/source rights require explicit approval and a
+reviewed source-policy change before a manual-main publication request can pass.
+The schedule remains artifact-only. See the [English workflow boundary](../README.md#theme-snapshot-workflow-and-draft-pr-boundary)
+and [中文说明](../README.zh-CN.md#主题快照-workflow-与草稿-pr-边界).
 
 ## Main Design Pressure
 
