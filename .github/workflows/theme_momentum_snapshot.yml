@@ -3,6 +3,11 @@ name: Theme Momentum Snapshot
 on:
   workflow_dispatch:
     inputs:
+      identity_only:
+        description: "Verify the configured publisher identity only; no collection, data changes, or PR. Main only."
+        required: false
+        default: false
+        type: boolean
       as_of:
         description: "Optional YYYY-MM-DD cutoff. Empty uses latest available/downloaded price date."
         required: false
@@ -45,13 +50,141 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # Manual diagnostic only. Normal generation and publication behavior is unchanged.
+      - name: Check trusted publisher identity context
+        id: publisher_identity_preflight
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_only }}
+        env:
+          RESEARCH_PUBLISHER_APP_ID: ${{ vars.RESEARCH_PUBLISHER_APP_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          expected_repository = "QuantStrategyLab/ResearchSignalContextPipelines"
+          expected_workflow_ref = expected_repository + "/.github/workflows/theme_momentum_snapshot.yml@refs/heads/main"
+          app_id_matches = os.environ.get("RESEARCH_PUBLISHER_APP_ID") == "5214420"
+          repository_id = os.environ.get("GITHUB_REPOSITORY_ID", "")
+          context_matches = (
+              os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+              and os.environ.get("GITHUB_REF") == "refs/heads/main"
+              and os.environ.get("GITHUB_REPOSITORY") == expected_repository
+              and os.environ.get("GITHUB_WORKFLOW_REF") == expected_workflow_ref
+              and repository_id.isascii() and repository_id.isdecimal()
+              and int(repository_id) > 0
+          )
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"app_id_matches={str(app_id_matches).lower()}\n")
+          if not (app_id_matches and context_matches):
+              print("PUBLISHER_IDENTITY_PREFLIGHT_FAILED")
+              raise SystemExit(1)
+          print("PUBLISHER_IDENTITY_PREFLIGHT_OK")
+          PY
+      - name: Create single-repository publisher identity token
+        id: publisher_identity_token
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.identity_only }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RESEARCH_PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.RESEARCH_PUBLISHER_APP_PRIVATE_KEY }}
+          owner: QuantStrategyLab
+          repositories: ResearchSignalContextPipelines
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Verify publisher installation and repository scope
+        id: publisher_identity_verify
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.identity_only }}
+        env:
+          RESEARCH_PUBLISHER_INSTALLATION_ID: ${{ steps.publisher_identity_token.outputs.installation-id }}
+          RESEARCH_PUBLISHER_TOKEN: ${{ steps.publisher_identity_token.outputs.token }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          from pathlib import Path
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+          installation_matches = os.environ.get("RESEARCH_PUBLISHER_INSTALLATION_ID") == "168603414"
+          scope_matches = False
+          verified = False
+          try:
+              token = os.environ.get("RESEARCH_PUBLISHER_TOKEN", "")
+              if installation_matches and token:
+                  request = urllib.request.Request(
+                      "https://api.github.com/installation/repositories?per_page=100",
+                      headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+                      method="GET",
+                  )
+                  with urllib.request.build_opener(NoRedirect()).open(request, timeout=20) as response:
+                      raw = response.read(1024 * 1024 + 1)
+                      if response.status == 200 and not response.headers.get("Link") and len(raw) <= 1024 * 1024:
+                          payload = json.loads(raw)
+                          if type(payload) is dict and type(payload.get("total_count")) is int and payload["total_count"] == 1:
+                              repositories = payload.get("repositories")
+                              if type(repositories) is list and len(repositories) == 1 and type(repositories[0]) is dict:
+                                  repository = repositories[0]
+                                  scope_matches = (
+                                      repository.get("full_name") == "QuantStrategyLab/ResearchSignalContextPipelines"
+                                      and type(repository.get("id")) is int
+                                      and repository["id"] == int(os.environ["GITHUB_REPOSITORY_ID"])
+                                  )
+                  verified = installation_matches and scope_matches
+          except Exception:
+              # No API payload, exception text, request headers, token or JWT is logged.
+              verified = False
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              for key, value in (
+                  ("installation_matches", installation_matches),
+                  ("single_repo_scope_matches", scope_matches),
+                  ("identity_verified", verified),
+              ):
+                  output.write(f"{key}={str(value).lower()}\n")
+          if not verified:
+              print("PUBLISHER_IDENTITY_VERIFICATION_FAILED")
+              raise SystemExit(1)
+          print("PUBLISHER_IDENTITY_VERIFIED")
+          PY
+      - name: Report publisher identity-only result
+        id: publisher_identity_summary
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.identity_only }}
+        env:
+          APP_ID_MATCHES: ${{ steps.publisher_identity_preflight.outputs.app_id_matches }}
+          INSTALLATION_MATCHES: ${{ steps.publisher_identity_verify.outputs.installation_matches }}
+          SINGLE_REPO_SCOPE_MATCHES: ${{ steps.publisher_identity_verify.outputs.single_repo_scope_matches }}
+          IDENTITY_VERIFIED: ${{ steps.publisher_identity_verify.outputs.identity_verified }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result = {
+              "app_id_matches": os.environ.get("APP_ID_MATCHES") == "true",
+              "installation_matches": os.environ.get("INSTALLATION_MATCHES") == "true",
+              "single_repo_scope_matches": os.environ.get("SINGLE_REPO_SCOPE_MATCHES") == "true",
+              "identity_verified": os.environ.get("IDENTITY_VERIFIED") == "true",
+              "published": False,
+          }
+          serialized = json.dumps(result, sort_keys=True)
+          print(serialized)
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as output:
+              output.write("Publisher identity-only result (no data published):\n" + serialized + "\n")
+          PY
       - uses: actions/checkout@v6
+        if: ${{ !inputs.identity_only }}
       - uses: actions/setup-python@v6
+        if: ${{ !inputs.identity_only }}
         with:
           python-version: "3.11"
       - name: Install package
+        if: ${{ !inputs.identity_only }}
         run: python -m pip install -e .
       - name: Build theme momentum snapshot
+        if: ${{ !inputs.identity_only }}
         env:
           INPUT_AS_OF: ${{ github.event.inputs.as_of || '' }}
           PRICES_PATH: ${{ github.event.inputs.prices_path || '' }}
@@ -78,6 +211,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Commit snapshot
+        if: ${{ !inputs.identity_only }}
         env:
           COMMIT_OUTPUTS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.commit_outputs || 'false' }}
         run: |
@@ -109,6 +243,7 @@ jobs:
             fi
           fi
       - name: Upload theme momentum artifact
+        if: ${{ !inputs.identity_only }}
         uses: actions/upload-artifact@v7
         with:
           name: theme-momentum-snapshot
