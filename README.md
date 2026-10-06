@@ -1,14 +1,5 @@
 # ResearchSignalContextPipelines
 
-
-## QSL architecture role
-
-- **Layer**: `research`.
-- **Responsibility**: medium/long-horizon research signal context pipeline.
-- **Owns**: theme context artifacts and AI shadow context outputs.
-- **Consumes**: public/research inputs and downstream advisory/pipeline consumers.
-- **Must not**: submit orders or mutate live runtime allocations.
-
 [Chinese README](README.zh-CN.md)
 
 > Investing involves risk. This project does not provide investment advice and is for education, research, and engineering review only.
@@ -18,6 +9,14 @@
 ResearchSignalContextPipelines is a QuantStrategyLab research signal context pipeline. It builds medium-horizon theme context and long-horizon AI shadow context artifacts.
 
 It produces research, audit, or orchestration artifacts. It should not submit broker orders or mutate live allocations by itself.
+
+## QSL architecture role
+
+- **Layer**: `research`.
+- **Responsibility**: medium/long-horizon research signal context pipeline.
+- **Owns**: theme context artifacts and AI shadow context outputs.
+- **Consumes**: public/research inputs and downstream advisory/pipeline consumers.
+- **Must not**: submit orders or mutate live runtime allocations.
 
 ## Output boundary
 
