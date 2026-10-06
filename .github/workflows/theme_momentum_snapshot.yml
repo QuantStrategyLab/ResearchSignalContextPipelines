@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      publish_draft_pr:
+        description: "Request a same-repository draft PR; source content approval is also required. Manual main only."
+        required: false
+        default: false
+        type: boolean
       as_of:
         description: "Optional YYYY-MM-DD cutoff. Empty uses latest available/downloaded price date."
         required: false
@@ -26,7 +31,7 @@ on:
           - "false"
           - "true"
       commit_outputs:
-        description: "Commit generated theme_momentum_snapshot.json back to data/output."
+        description: "Deprecated, ignored: direct commits are disabled; this never authorizes a draft PR."
         required: false
         default: "false"
         type: choice
@@ -34,12 +39,11 @@ on:
           - "false"
           - "true"
   schedule:
-    # Refresh before the advisory publication workflow. The script records data
-    # source and hash metadata; downstream use remains research-only.
+    # Schedule is artifact-only. It never opts into draft PR publication.
     - cron: "45 11 * * 6"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
@@ -49,13 +53,19 @@ jobs:
   build-theme-momentum:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      artifact_id: ${{ steps.publisher_package_upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.publisher_package_upload.outputs.artifact-digest }}
+      candidate_sha256: ${{ steps.publisher_package.outputs.candidate_sha256 }}
+      receipt_sha256: ${{ steps.publisher_package.outputs.receipt_sha256 }}
     steps:
-      # Manual diagnostic only. Normal generation and publication behavior is unchanged.
+      # Manual diagnostic only. Conflicting flags fail before either App mint.
       - name: Check trusted publisher identity context
         id: publisher_identity_preflight
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_only }}
         env:
           RESEARCH_PUBLISHER_APP_ID: ${{ vars.RESEARCH_PUBLISHER_APP_ID }}
+          PUBLISH_DRAFT_PR: ${{ inputs.publish_draft_pr }}
         run: |
           python - <<'PY'
           import os
@@ -67,6 +77,7 @@ jobs:
           repository_id = os.environ.get("GITHUB_REPOSITORY_ID", "")
           context_matches = (
               os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+              and os.environ.get("PUBLISH_DRAFT_PR") != "true"
               and os.environ.get("GITHUB_REF") == "refs/heads/main"
               and os.environ.get("GITHUB_REPOSITORY") == expected_repository
               and os.environ.get("GITHUB_WORKFLOW_REF") == expected_workflow_ref
@@ -174,9 +185,18 @@ jobs:
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as output:
               output.write("Publisher identity-only result (no data published):\n" + serialized + "\n")
           PY
-      - uses: actions/checkout@v6
+      - name: Check out generation source
+        id: generation_checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         if: ${{ !inputs.identity_only }}
-      - uses: actions/setup-python@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check publication content admission before collection
+        id: publisher_admission
+        if: ${{ !inputs.identity_only && inputs.publish_draft_pr }}
+        run: python scripts/publish_theme_snapshot_pr.py admission
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         if: ${{ !inputs.identity_only }}
         with:
           python-version: "3.11"
@@ -184,6 +204,7 @@ jobs:
         if: ${{ !inputs.identity_only }}
         run: python -m pip install -e .
       - name: Build theme momentum snapshot
+        id: generation
         if: ${{ !inputs.identity_only }}
         env:
           INPUT_AS_OF: ${{ github.event.inputs.as_of || '' }}
@@ -191,6 +212,7 @@ jobs:
           STRICT_DOWNLOADS: ${{ github.event.inputs.strict_downloads || 'false' }}
         run: |
           set -euo pipefail
+          echo "started_at=$(date -u +'%Y-%m-%dT%H:%M:%S.%6NZ')" >> "$GITHUB_OUTPUT"
           mkdir -p data/output
           ARGS=(--output data/output/theme_momentum_snapshot.json)
           if [ -n "${INPUT_AS_OF}" ]; then
@@ -203,6 +225,7 @@ jobs:
             ARGS+=(--strict-downloads)
           fi
           python scripts/build_theme_momentum_snapshot.py "${ARGS[@]}" | tee /tmp/theme_momentum_summary.json
+          echo "completed_at=$(date -u +'%Y-%m-%dT%H:%M:%S.%6NZ')" >> "$GITHUB_OUTPUT"
           {
             echo "## Theme momentum snapshot"
             echo ""
@@ -210,42 +233,280 @@ jobs:
             cat /tmp/theme_momentum_summary.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Commit snapshot
-        if: ${{ !inputs.identity_only }}
+      - name: Prepare same-run publication package
+        id: publisher_package
+        if: ${{ !inputs.identity_only && inputs.publish_draft_pr }}
         env:
-          COMMIT_OUTPUTS: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.commit_outputs || 'false' }}
+          PACKAGE_DIR: ${{ runner.temp }}/theme-publication-package
+          GENERATION_STARTED_AT: ${{ steps.generation.outputs.started_at }}
+          GENERATION_COMPLETED_AT: ${{ steps.generation.outputs.completed_at }}
         run: |
-          set -euo pipefail
-          if [ "${COMMIT_OUTPUTS}" != "true" ]; then
-            echo "Snapshot commit disabled."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/output/theme_momentum_snapshot.json
-          if git diff --cached --quiet; then
-            echo "No theme momentum changes to commit."
-          else
-            git commit -m "Update theme momentum snapshot [skip ci]"
-            push_log="$(mktemp)"
-            if git push 2>"${push_log}"; then
-              rm -f "${push_log}"
-            else
-              if grep -Fq 'GH013: Repository rule violations found for refs/heads/main' "${push_log}" && grep -Eqi 'required status check' "${push_log}"; then
-                echo "Push blocked by repository rules; keeping artifact-only output."
-                cat "${push_log}"
-                rm -f "${push_log}"
-              else
-                cat "${push_log}" >&2
-                rm -f "${push_log}"
-                exit 1
-              fi
-            fi
-          fi
-      - name: Upload theme momentum artifact
-        if: ${{ !inputs.identity_only }}
-        uses: actions/upload-artifact@v7
+          python scripts/publish_theme_snapshot_pr.py prepare \
+            --candidate data/output/theme_momentum_snapshot.json \
+            --package-dir "$PACKAGE_DIR" \
+            --started-at "$GENERATION_STARTED_AT" \
+            --completed-at "$GENERATION_COMPLETED_AT"
+      - name: Upload same-run publication package
+        id: publisher_package_upload
+        if: ${{ !inputs.identity_only && inputs.publish_draft_pr }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: theme-momentum-snapshot
+          name: theme-momentum-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/theme-publication-package/theme_momentum_snapshot.json
+            ${{ runner.temp }}/theme-publication-package/publication-package.json
+          if-no-files-found: error
+      - name: Upload theme momentum artifact or failed-package fallback
+        id: snapshot_upload
+        if: ${{ always() && !inputs.identity_only && steps.generation.outcome == 'success' && (!inputs.publish_draft_pr || steps.publisher_package_upload.outcome != 'success') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: theme-momentum-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
           path: data/output/theme_momentum_snapshot.json
+          if-no-files-found: error
+      - name: Report generation and publication request
+        id: generation_summary
+        if: ${{ always() && !inputs.identity_only }}
+        env:
+          PUBLICATION_REQUESTED: ${{ inputs.publish_draft_pr }}
+          LEGACY_COMMIT_OUTPUTS: ${{ inputs.commit_outputs }}
+          GENERATION_OUTCOME: ${{ steps.generation.outcome }}
+          ADMISSION_OUTCOME: ${{ steps.publisher_admission.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.publisher_package.outcome }}
+          PACKAGE_UPLOAD_OUTCOME: ${{ steps.publisher_package_upload.outcome }}
+          SNAPSHOT_UPLOAD_OUTCOME: ${{ steps.snapshot_upload.outcome }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          requested = os.environ.get("PUBLICATION_REQUESTED") == "true"
+          generated = os.environ.get("GENERATION_OUTCOME") == "success"
+          if requested and os.environ.get("ADMISSION_OUTCOME") != "success":
+              status = "admission_rejected"
+          elif not generated:
+              status = "generation_failed"
+          elif requested and os.environ.get("PACKAGE_OUTCOME") != "success":
+              status = "package_rejected"
+          elif requested and os.environ.get("PACKAGE_UPLOAD_OUTCOME") == "success":
+              status = "package_ready"
+          elif not requested and os.environ.get("SNAPSHOT_UPLOAD_OUTCOME") == "success":
+              status = "artifact_only"
+          else:
+              status = "artifact_upload_failed"
+          result = {
+              "generated": generated,
+              "publication_requested": requested,
+              "published": False,
+              "status": status,
+              "legacy_commit_outputs_ignored": os.environ.get("LEGACY_COMMIT_OUTPUTS") == "true",
+          }
+          serialized = json.dumps(result, sort_keys=True)
+          print(serialized)
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as output:
+              output.write("Theme generation result (no data published):\n" + serialized + "\n")
+          PY
+
+  publish-theme-draft-pr:
+    needs: build-theme-momentum
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' &&
+          github.repository == 'QuantStrategyLab/ResearchSignalContextPipelines' &&
+          github.ref == 'refs/heads/main' &&
+          github.workflow_ref == 'QuantStrategyLab/ResearchSignalContextPipelines/.github/workflows/theme_momentum_snapshot.yml@refs/heads/main' &&
+          inputs.publish_draft_pr && !inputs.identity_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out reviewed publisher source
+        id: publisher_checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download the exact current-run package
+        id: publisher_download
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.build-theme-momentum.outputs.artifact_id }}
+          path: ${{ runner.temp }}/theme-publication-package
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Validate package and unchanged main before mint
+        id: publisher_validate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PACKAGE_DIR: ${{ runner.temp }}/theme-publication-package
+          CANDIDATE_SHA256: ${{ needs.build-theme-momentum.outputs.candidate_sha256 }}
+          RECEIPT_SHA256: ${{ needs.build-theme-momentum.outputs.receipt_sha256 }}
+          ARTIFACT_ID: ${{ needs.build-theme-momentum.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.build-theme-momentum.outputs.artifact_digest }}
+        run: |
+          python scripts/publish_theme_snapshot_pr.py validate \
+            --package-dir "$PACKAGE_DIR" \
+            --candidate-sha256 "$CANDIDATE_SHA256" \
+            --receipt-sha256 "$RECEIPT_SHA256" \
+            --artifact-id "$ARTIFACT_ID" \
+            --artifact-digest "$ARTIFACT_DIGEST"
+      - name: Create single-repository draft publisher token
+        id: draft_publisher_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: "5214420"
+          private-key: ${{ secrets.RESEARCH_PUBLISHER_APP_PRIVATE_KEY }}
+          owner: QuantStrategyLab
+          repositories: ResearchSignalContextPipelines
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Create or reuse the exact draft PR
+        id: draft_publish
+        env:
+          RESEARCH_PUBLISHER_TOKEN: ${{ steps.draft_publisher_token.outputs.token }}
+          RESEARCH_PUBLISHER_INSTALLATION_ID: ${{ steps.draft_publisher_token.outputs.installation-id }}
+          RESEARCH_PUBLISHER_APP_SLUG: ${{ steps.draft_publisher_token.outputs.app-slug }}
+          PACKAGE_DIR: ${{ runner.temp }}/theme-publication-package
+          CANDIDATE_SHA256: ${{ needs.build-theme-momentum.outputs.candidate_sha256 }}
+          RECEIPT_SHA256: ${{ needs.build-theme-momentum.outputs.receipt_sha256 }}
+          ARTIFACT_ID: ${{ needs.build-theme-momentum.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.build-theme-momentum.outputs.artifact_digest }}
+          RESULT_PATH: ${{ runner.temp }}/theme-publication-result/publication-result.json
+        run: |
+          python scripts/publish_theme_snapshot_pr.py publish \
+            --package-dir "$PACKAGE_DIR" \
+            --candidate-sha256 "$CANDIDATE_SHA256" \
+            --receipt-sha256 "$RECEIPT_SHA256" \
+            --artifact-id "$ARTIFACT_ID" \
+            --artifact-digest "$ARTIFACT_DIGEST" \
+            --result "$RESULT_PATH"
+      - name: Report sanitized draft publisher result
+        id: draft_publisher_summary
+        if: ${{ always() }}
+        env:
+          RESULT_PATH: ${{ runner.temp }}/theme-publication-result/publication-result.json
+          CHECKOUT_OUTCOME: ${{ steps.publisher_checkout.outcome }}
+          DOWNLOAD_OUTCOME: ${{ steps.publisher_download.outcome }}
+          VALIDATE_OUTCOME: ${{ steps.publisher_validate.outcome }}
+          MINT_OUTCOME: ${{ steps.draft_publisher_token.outcome }}
+          PUBLISH_OUTCOME: ${{ steps.draft_publish.outcome }}
+          ARTIFACT_ID: ${{ needs.build-theme-momentum.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.build-theme-momentum.outputs.artifact_digest }}
+          CANDIDATE_SHA256: ${{ needs.build-theme-momentum.outputs.candidate_sha256 }}
+          RECEIPT_SHA256: ${{ needs.build-theme-momentum.outputs.receipt_sha256 }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path(os.environ["RESULT_PATH"])
+          result = {"published": False, "review_required": True, "status": "publisher_failed"}
+          for outcome, failure in (
+              ("CHECKOUT_OUTCOME", "checkout_failed"),
+              ("DOWNLOAD_OUTCOME", "download_failed"),
+              ("VALIDATE_OUTCOME", "validation_rejected"),
+              ("MINT_OUTCOME", "mint_failed"),
+          ):
+              if os.environ.get(outcome) != "success":
+                  result["status"] = failure
+                  break
+          else:
+              try:
+                  raw = path.read_bytes()
+                  value = json.loads(raw) if len(raw) <= 16384 else None
+                  if type(value) is dict:
+                      for key in ("branch_created", "pr_created"):
+                          if key in value and (value[key] is None or type(value[key]) is bool):
+                              result[key] = value[key]
+                      if type(value.get("main_contains_candidate")) is bool:
+                          result["main_contains_candidate"] = value["main_contains_candidate"]
+                      if value.get("status") in {"failed", "already_on_base", "draft_pr_created", "draft_pr_reused"}:
+                          result["status"] = value["status"]
+                      # Only known public reason codes, never arbitrary exception text.
+                      reasons = set("""
+                          API_ALREADY_EXISTS API_METHOD_FORBIDDEN API_PAGINATION_UNEXPECTED API_RESPONSE_OVERSIZED
+                          API_WRITE_FORBIDDEN REF_WRITE_FORBIDDEN TREE_WRITE_FORBIDDEN PR_WRITE_FORBIDDEN
+                          RECEIPT_NONCANONICAL PUBLICATION_FAILED
+                          API_TARGET_FORBIDDEN API_TRANSPORT_FAILED APP_IDENTITY_MISMATCH
+                          APP_SCOPE_MISMATCH ARGUMENTS_REQUIRED ARTIFACT_BINDING_INVALID
+                          BASE_INVALID BASE_MOVED BASE_PATH_INVALID BRANCH_CREATION_UNCONFIRMED
+                          BRANCH_MODIFIED CANDIDATE_EXPIRED CANDIDATE_PATH_INVALID
+                          CHECKOUT_SHA_MISMATCH CONFIG_HASH_MISMATCH CONTENT_APPROVAL_REQUIRED
+                          COUNT_INVALID COUNT_MISMATCH COVERAGE_MISMATCH DATE_INVALID
+                          FILE_NOT_REGULAR FILE_OVERSIZED GENERATION_TIME_INVALID JSON_DUPLICATE_KEY
+                          JSON_INVALID JSON_NONFINITE NUMBER_INVALID NUMBER_RANGE
+                          PACKAGE_CANDIDATE_MISMATCH PACKAGE_CONTEXT_MISMATCH PACKAGE_HASH_INVALID
+                          PACKAGE_HASH_MISMATCH PACKAGE_NOT_EMPTY PACKAGE_PATHS_INVALID
+                          PACKAGE_PATH_INVALID PACKAGE_SCHEMA_INVALID PRICE_SOURCE_NOT_ADMITTED
+                          PR_CREATION_UNCONFIRMED PR_HUMAN_STATE_CHANGED PR_IDENTITY_AMBIGUOUS
+                          PR_IDENTITY_MISMATCH REMOTE_BLOB_MISMATCH REMOTE_COMMIT_INVALID
+                          REMOTE_REF_INVALID REMOTE_TREE_INVALID RESEARCH_CONTRACT_MISMATCH
+                          RESULT_REQUIRED RUN_INVALID SCHEMA_KEYS SCOPE_INVALID SOURCE_SHA_INVALID
+                          SUMMARY_MISMATCH SYMBOL_SCOPE_INVALID THEME_SCHEMA_INVALID THEME_SCOPE_INVALID
+                          TIME_INVALID TOKEN_UNAVAILABLE UNTRUSTED_CONTEXT VALIDATION_OR_API_FAILED
+                      """.split())
+                      reasons.update(f"API_HTTP_{code}" for code in range(100, 600))
+                      reason = value.get("reason_code")
+                      if type(reason) is str and reason in reasons:
+                          result["reason_code"] = reason
+                      elif reason is not None:
+                          result["reason_code"] = "VALIDATION_OR_API_FAILED"
+                      for key, pattern in (
+                          ("branch", r"automation/theme-[1-9][0-9]*-[1-9][0-9]*-[0-9a-f]{16}"),
+                          ("package_key", r"[0-9a-f]{64}"),
+                          ("pr_url", r"https://github\.com/QuantStrategyLab/ResearchSignalContextPipelines/pull/[1-9][0-9]*"),
+                          ("head_sha", r"[0-9a-f]{40}"),
+                          ("candidate_sha256", r"[0-9a-f]{64}"),
+                      ):
+                          field = value.get(key)
+                          if type(field) is str and re.fullmatch(pattern, field):
+                              result[key] = field
+              except Exception:
+                  pass
+          # Bind the sanitized result to the exact same-run transport outputs.
+          for key, pattern in (
+              ("artifact_id", r"[1-9][0-9]*"),
+              ("artifact_digest", r"[0-9a-f]{64}"),
+              ("candidate_sha256", r"[0-9a-f]{64}"),
+              ("receipt_sha256", r"[0-9a-f]{64}"),
+          ):
+              value = os.environ.get(key.upper(), "")
+              if re.fullmatch(pattern, value):
+                  result[key] = value
+          # Producer provenance comes only from this job's trusted runtime, never the artifact.
+          expected_repository = "QuantStrategyLab/ResearchSignalContextPipelines"
+          expected_workflow = expected_repository + "/.github/workflows/theme_momentum_snapshot.yml@refs/heads/main"
+          if (
+              os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+              and os.environ.get("GITHUB_REF") == "refs/heads/main"
+              and os.environ.get("GITHUB_REPOSITORY") == expected_repository
+              and os.environ.get("GITHUB_REPOSITORY_ID") == "1252248184"
+              and os.environ.get("GITHUB_WORKFLOW_REF") == expected_workflow
+          ):
+              result.update(repository=expected_repository, repository_id="1252248184", workflow_ref=expected_workflow)
+              source_sha = os.environ.get("GITHUB_SHA", "")
+              if re.fullmatch(r"[0-9a-f]{40}", source_sha):
+                  result.update(source_sha=source_sha, expected_base_sha=source_sha)
+              for key in ("run_id", "run_attempt"):
+                  value = os.environ.get("GITHUB_" + key.upper(), "")
+                  if re.fullmatch(r"[1-9][0-9]*", value):
+                      result[key] = value
+          result["published"] = False
+          result["review_required"] = True
+          serialized = json.dumps(result, sort_keys=True)
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(serialized + "\n", encoding="utf-8")
+          print(serialized)
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as output:
+              output.write("Draft PR result (human review and merge still required):\n" + serialized + "\n")
+          PY
+      - name: Upload sanitized publisher result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: theme-momentum-publication-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/theme-publication-result/publication-result.json
           if-no-files-found: error
