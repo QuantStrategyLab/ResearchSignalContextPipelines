@@ -10,14 +10,22 @@ import textwrap
 import pytest
 
 
-def test_dispatch_shadow_signal_pins_bridge_ref_via_variable() -> None:
+def test_shadow_signal_no_longer_dispatches_retired_bridge() -> None:
     workflow = Path(".github/workflows/dispatch_shadow_signal.yml").read_text(encoding="utf-8")
 
-    assert "BRIDGE_REF: ${{ vars.CODEX_AUDIT_BRIDGE_REF || 'main' }}" in workflow
-    assert "default: \"codex\"" in workflow
-    assert "BRIDGE_PROVIDER: ${{ github.event.inputs.provider || 'codex' }}" in workflow
-    assert '"ref": os.environ["BRIDGE_REF"]' in workflow
-    assert "QuantStrategyLab/AIAuditBridge" in workflow
+    for retired in (
+        "AIAuditBridge",
+        "CODEX_AUDIT_",
+        "codex_audit.yml",
+        "create-github-app-token",
+        "BRIDGE_PROVIDER",
+        "BRIDGE_REF",
+        "/dispatches",
+    ):
+        assert retired not in workflow
+    assert "scripts/post_shadow_signal_request.py" in workflow
+    assert "--provider manual" in workflow
+    assert "issues: write" in workflow
 
 
 @pytest.mark.parametrize("manifest", [{"schema_version": "1"}, {"schema_version": 2}])

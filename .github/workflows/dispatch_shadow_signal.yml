@@ -7,19 +7,8 @@ on:
     - cron: "30 2 1 * *"
   workflow_dispatch:
     inputs:
-      provider:
-        description: "Bridge provider"
-        required: false
-        type: choice
-        default: "codex"
-        options:
-          - auto
-          - api
-          - anthropic
-          - codex
-          - openai
       source_ref:
-        description: "Ref to pass to AIAuditBridge"
+        description: "Source ref recorded in the shadow signal issue"
         required: false
         default: "main"
 
@@ -36,10 +25,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      BRIDGE_REPOSITORY: ${{ vars.CODEX_AUDIT_BRIDGE_REPOSITORY || 'QuantStrategyLab/AIAuditBridge' }}
-      BRIDGE_REF: ${{ vars.CODEX_AUDIT_BRIDGE_REF || 'main' }}
-      BRIDGE_TASK: long_horizon_signal_shadow
-      BRIDGE_PROVIDER: ${{ github.event.inputs.provider || 'codex' }}
       SOURCE_REF: ${{ github.event.inputs.source_ref || 'main' }}
       SHADOW_SIGNAL_LABEL: long-horizon-shadow
     steps:
@@ -69,8 +54,8 @@ jobs:
           python scripts/post_shadow_signal_request.py \
             --repo "${GITHUB_REPOSITORY}" \
             --source-ref "${SOURCE_REF}" \
-            --provider "${BRIDGE_PROVIDER}" \
-            --bridge-repository "${BRIDGE_REPOSITORY}" \
+            --provider manual \
+            --bridge-repository none \
             --context-file data/output/context_bundle/latest_context_bundle.json \
             --label "${SHADOW_SIGNAL_LABEL}"
 
@@ -82,95 +67,9 @@ jobs:
             echo "- Issue: [${{ steps.shadow_issue.outputs.issue_title }}](${{ steps.shadow_issue.outputs.issue_url }})"
             echo "- Issue action: \`${{ steps.shadow_issue.outputs.issue_action }}\`"
             echo "- Source ref: \`${SOURCE_REF}\`"
-            echo "- Provider: \`${BRIDGE_PROVIDER}\`"
-            echo "- Bridge: \`${BRIDGE_REPOSITORY}\`"
+            echo "- Review: manual (retired bridge dispatch removed)"
             echo "- Mode: \`shadow\`"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Detect GitHub App Credentials
-        id: app_credentials
-        env:
-          APP_ID: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create GitHub App Token For Bridge Repository
-        id: bridge_app_token
-        if: steps.app_credentials.outputs.available == 'true'
-        continue-on-error: true
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
-          private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: |
-            AIAuditBridge
-          permission-actions: write
-
-      - name: Create shadow signal issue and dispatch bridge
-        env:
-          GH_TOKEN: ${{ github.token }}
-          APP_TOKEN: ${{ steps.bridge_app_token.outputs.token }}
-          CODEX_AUDIT_DISPATCH_TOKEN: ${{ secrets.CODEX_AUDIT_DISPATCH_TOKEN }}
-          ISSUE_NUMBER: ${{ steps.shadow_issue.outputs.issue_number }}
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          import urllib.request
-          import urllib.error
-
-          repo = os.environ["GITHUB_REPOSITORY"]
-          bridge_repo = os.environ["BRIDGE_REPOSITORY"]
-          token = os.environ["GH_TOKEN"]
-          dispatch_token = os.environ.get("APP_TOKEN") or os.environ.get("CODEX_AUDIT_DISPATCH_TOKEN")
-          if not dispatch_token:
-              raise SystemExit("Bridge dispatch requires a GitHub App token or CODEX_AUDIT_DISPATCH_TOKEN")
-
-          def request(method, url, payload=None, auth_token=token):
-              data = json.dumps(payload).encode("utf-8") if payload is not None else None
-              req = urllib.request.Request(
-                  url,
-                  data=data,
-                  method=method,
-                  headers={
-                      "Authorization": f"Bearer {auth_token}",
-                      "Accept": "application/vnd.github+json",
-                      "Content-Type": "application/json",
-                  },
-              )
-              with urllib.request.urlopen(req, timeout=60) as response:
-                  body = response.read().decode("utf-8")
-                  return response.status, json.loads(body) if body else None
-
-          dispatch_payload = {
-              "ref": os.environ["BRIDGE_REF"],
-              "inputs": {
-                  "source_repo": repo,
-                  "issue_number": os.environ["ISSUE_NUMBER"],
-                  "source_ref": os.environ["SOURCE_REF"],
-                  "mode": "review_and_fix",
-                  "provider": os.environ["BRIDGE_PROVIDER"],
-                  "task": os.environ["BRIDGE_TASK"],
-                  "auto_merge": "false",
-              },
-          }
-          status, _ = request(
-              "POST",
-              f"https://api.github.com/repos/{bridge_repo}/actions/workflows/codex_audit.yml/dispatches",
-              dispatch_payload,
-              auth_token=dispatch_token,
-          )
-          if status not in (201, 204):
-              raise RuntimeError(f"unexpected dispatch status: {status}")
-          print(f"Dispatched {bridge_repo} for issue #{os.environ['ISSUE_NUMBER']}")
-          PY
 
       - name: Upload context bundle
         uses: actions/upload-artifact@v7
