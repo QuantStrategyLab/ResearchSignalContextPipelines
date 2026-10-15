@@ -221,7 +221,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--source-ref", default="main")
     parser.add_argument("--provider", default="codex")
-    parser.add_argument("--bridge-repository", default="QuantStrategyLab/AIAuditBridge")
+    parser.add_argument("--bridge-repository", default="QuantStrategyLab/PersonalAIService")
     parser.add_argument("--as-of-date")
     parser.add_argument("--context-file", help="Optional JSON context bundle to embed in the issue body")
     parser.add_argument("--label", default=DEFAULT_LABEL)
