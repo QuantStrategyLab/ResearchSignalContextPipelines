@@ -10,3 +10,12 @@ data/input/*
 
 # Generated shadow outputs may be checked in only when intentionally promoted.
 data/output/tmp/
+
+# Keep AI rule files and shared engineering conventions tracked even when a
+# personal global ignore excludes Markdown.
+!AGENTS.md
+!CLAUDE.md
+!.github/engineering.md
+
+# Local editor, OS and tool cache files.
+.DS_Store
