@@ -39,6 +39,8 @@ python scripts/validate_latest_signal.py examples/latest_signal.example.json
 CI also validates the structure of changed live signal pairs and replays the
 example overlay against the example price history.
 
+Organization documentation rules are checked by `python scripts/check_style.py`, which also runs in CI as the `Documentation check` job.
+
 ## Naming and documentation
 
 - Developer documentation is English by default; Chinese siblings use
