@@ -70,6 +70,8 @@ Organization documentation rules are checked by `python scripts/check_style.py`,
 
 ## Do not
 
+- Only the owner, or a reviewer explicitly authorized by the owner, may apply the `owner-approved` label; coding agents must never apply it to their own PRs.
+
 - Do not backfill today's information as historically known context.
 - Do not treat shadow context as a live allocation or a trading instruction.
 - Do not commit private research inputs; only `data/input/.gitkeep` and the
