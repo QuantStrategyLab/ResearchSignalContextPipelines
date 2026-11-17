@@ -2,6 +2,8 @@
 
 Thanks for contributing to `ResearchSignalContextPipelines`.
 
+Documentation follows the [QuantStrategyLab documentation style guide](https://github.com/QuantStrategyLab/.github/blob/main/docs/STYLE_GUIDE.md).
+
 ## Ground Rules
 
 - Prefer small pull requests with one clear purpose.
